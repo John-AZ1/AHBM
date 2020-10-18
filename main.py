@@ -1,135 +1,113 @@
+#!/bin/python3
+
+### BEGIN INIT INFO
+# Provides:          myservice
+# Required-Start:    $remote_fs $syslog
+# Required-Stop:     $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Automatic Hot Beverage Machine
+# Description:       Put a long description of the service here
+### END INIT INFO
+
 import RPi.GPIO as GPIO
-import time
-import argparse
+import logging
+import json
+from time import sleep
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    handlers=[
+        logging.FileHandler('/home/pi/AHBM/AHBM.log'),
+        logging.StreamHandler()
+    ]    
+)
 
 GPIO.setmode(GPIO.BOARD)
 
-class Stepper:
-    def __init__(self, pins):
-        # A, A-, B, B-
-        # Yellow, Orange, Blue, Green
-        self.pins = pins
-        for pin in self.pins:
-            GPIO.setup(pin, GPIO.OUT)
-            GPIO.output(pin, 0)
-        self.totalSteps = 400
-        self.stepIndex = 0
-        self.coilArr = [
-            [1,0,1,0],
-            [0,1,1,0],
-            [0,1,0,1],
-            [1,0,0,1],
-        ]
-    
-    def calibrate(self):
-        while True:
-            self.step(1, 0.1)
-            done = input()
-            if done == 'y':
-                break
-        self.step(-1, 0.1)
-
-    def setCoils(self, state):
-        for i in range(len(state)):
-            GPIO.output(self.pins[i], state[i])
-
-    def step(self, delay=0.1, backwards=False):
-        if backwards:
-            self.stepIndex = self.stepIndex - 1 if self.stepIndex > 0 else 3
+pins = {
+    'LED': {
+        'RED': 21,
+        'GRN': 23,
+    },
+    'input': {
+        'LFT': 19,
+        'MOD': 15,
+        'SEL': 13,
+        'RGT': 11,
+    },
+    'stepper': {
+        'ENA': 8,
+        'DIR': 10,
+        'PUL': 12,
+    },
+}
+with open('/home/pi/AHBM/settings.json', 'r') as f:
+    settings = json.load(f)
+for group in pins:
+    for pin in pins[group]:
+        if group is 'input':
+            GPIO.setup(pins[group][pin], GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
         else:
-            self.stepIndex = self.stepIndex + 1 if self.stepIndex < 3 else 0
-        self.setCoils(self.coilArr[self.stepIndex])
-        time.sleep(delay)
+            GPIO.setup(pins[group][pin], GPIO.OUT)
 
-class Cup:
-    def __init__(self, index, totalSteps, totalCupNo):
-        self.posLit = (totalSteps / totalCupNo) * index
-        self.pos = index
-        self.index = index
-        self.full = False
+def inputHandler(pin, string):
+    def wrap(func):
+        def wrappedFunc(*args):
+            if GPIO.input(pin):
+                GPIO.output(pins['LED']['RED'], 1)
+                logging.info(string)
+                func(*args)
+                sleep(0.3)
+        return wrappedFunc
+    return wrap
 
-    def incPos(self):
-        self.pos = self.pos - 1 if self.pos > 0 else 7
+@inputHandler(pins['input']['RGT'], 'Right')
+def right():
+    GPIO.output(pins['LED']['GRN'], 1)
+    GPIO.output(pins['stepper']['DIR'], 1)
 
-class AHBM:
-    def __init__(self, basePins=[16, 18, 7, 11], selectPins=[35, 37, 33, 31], cupNo=8):
-        self.motors = {
-            "base": Stepper(basePins),
-            "select": Stepper(selectPins)
-        }
-        self.cupMovement = int(self.motors["base"].totalSteps / cupNo)
-        self.cups = [Cup(i, self.motors["base"].totalSteps, cupNo) for i in range(cupNo)] 
+@inputHandler(pins['input']['LFT'], 'Left')
+def left():
+    logging.info('Actual Delay: {:f}'.format(settings['delay']))
+    GPIO.output(pins['LED']['GRN'], 0)
+    GPIO.output(pins['stepper']['DIR'], 0)
 
-    def debugCups(self):
-        print([cup.pos for cup in self.cups])
+@inputHandler(pins['input']['SEL'], 'Select')
+def select():
+    for i in range(int(settings['stepsRev']/8)):
+        GPIO.output(pins['stepper']['PUL'], 1)
+        sleep(settings['delay'])
+        GPIO.output(pins['stepper']['PUL'], 0)
+        sleep(settings['delay'])
 
-    def turn(self):
-        for i in range(self.cupMovement):
-            self.motors["base"].step()
-        for cupI in range(len(self.cups)):
-            self.cups[cupI].incPos()
-        self.debugCups()
-        
-    def activateTea(self, tea):
-        print(tea, "is in Cup")
+@inputHandler(pins['input']['MOD'], 'Mode')
+def mode():
+    global settings
+    with open('/home/pi/AHBM/settings.json') as f:
+        settings = json.load(f)
+    logging.info('Delay: {:f}'.format(settings['delay']))
 
-    def activateWater(self):
-        print("Water is in Cup")
+startupNo = 1
+logging.info('AHBM: START UP...')
+for i in range(3):
+    GPIO.output(pins['LED']['GRN'], 1 if startupNo else 0)
+    GPIO.output(pins['LED']['RED'], 0 if startupNo else 1)
+    startupNo = 0 if startupNo else 1
+    sleep(0.5)
+logging.info('AHBM: READY')
 
-    def makeCup(self, tea):
-        cupI = None
-        for cup in self.cups:
-            if not cup.full:
-                cupI = cup.index
-                break
-        if cupI is None:
-            print("All cups are full")
-            return("Err CupsFull")
+GPIO.output(pins['stepper']['ENA'], 0)
+while True:
+    try:
+        GPIO.output(pins['LED']['RED'], 0)
+        left()
+        right()
+        select()
+        mode()
+    except KeyboardInterrupt:
+        break
 
-        print("Current Cup Index:", cupI)
-        while True:
-            if self.cups[cupI].pos is 0:
-                break
-            else:
-                self.turn()
-        print(self.cups[cupI].pos)
-        self.activateTea(tea)
-        self.turn()
-        self.activateWater()
-        self.cups[cupI].full = True
-
-Abraham = AHBM()
-Abraham.makeCup("Earl Gray")
-Abraham.makeCup("Peppermint")
-
-# motors = {
-    # "base": Stepper([16, 18, 7, 11]),
-    # "select": Stepper([35, 37, 33, 31])
-# }
-# 
-# parser = argparse.ArgumentParser()
-# parser.add_argument('motor', choices=motors.keys(), nargs='+')
-# parser.add_argument('-s', '--steps', type=int, default=10)
-# parser.add_argument('-d', '--delay', type=float, default=0.1)
-# parser.add_argument('-c', '--calibrate', action="store_true")
-# parser.add_argument('-l', '--loop', action="store_true")
-# args = parser.parse_args()
-# 
-# try:
-    # if args.calibrate:
-        # for motor in args.motor:
-            # print('Calibrating', motor)
-            # motors[motor].calibrate()
-# 
-    # print(args.motor)
-    # if args.loop:
-        # while True:
-            # motors[args.motor[0]].step(args.delay)
-    # else:
-        # for motor in args.motor:
-            # for i in range(abs(args.steps)):
-                # motors[motor].step(args.delay, False if args.steps > 0 else True)
-    # GPIO.cleanup()
-# 
-# except KeyboardInterrupt:
-    # GPIO.cleanup()
+for pin in pins['LED']:
+    GPIO.output(pins['LED'][pin], 0)
+GPIO.cleanup()
